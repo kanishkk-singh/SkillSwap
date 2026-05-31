@@ -19,9 +19,10 @@ const httpServer = createServer(app);            // ← ADD 3
 const io = new Server(httpServer, {              // ← ADD 4
   cors: {
     origin: [
-      'http://localhost:3000',
-      'https://skill-swap-chi-nine.vercel.app',
-    ],
+  'http://localhost:3000',
+  'https://skill-swap-chi-nine.vercel.app',
+  'https://skill-swap-qxni6wrd9-kanishkk-singhs-projects.vercel.app',
+],
     methods: ['GET', 'POST'],
   },
 });
@@ -73,6 +74,7 @@ io.on('connection', (socket) => {
 const allowedOrigins = [
   'http://localhost:3000',
   'https://skill-swap-chi-nine.vercel.app',
+  'https://skill-swap-qxni6wrd9-kanishkk-singhs-projects.vercel.app',
 ];
 
 app.use(cors({
