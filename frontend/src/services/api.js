@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const api = axios.create({
- baseURL: 'https://skillswap-uovv.onrender.com/api',
+ baseURL: 'https://skillswap-1-nhi4.onrender.com/api',
   headers: { 'Content-Type': 'application/json' },
 });
 

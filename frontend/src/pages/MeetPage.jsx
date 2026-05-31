@@ -120,8 +120,7 @@ export default function MeetPage() {
   // ── Setup Socket.io events ─────────────────────────────────────────────────
   const setupSocket = useCallback((stream) => {
     const BACKEND = import.meta.env.VITE_API_URL?.replace('/api', '')
-                 || 'http://localhost:5000';
-
+                 || 'https://skillswap-1-nhi4.onrender.com';
     const socket = io(BACKEND, { transports: ['websocket'] });
     socketRef.current = socket;
 
