@@ -18,7 +18,7 @@ const httpServer = createServer(app);            // ← ADD 3
 // ── Socket.io setup ───────────────────────────────────────────────────
 const io = new Server(httpServer, {              // ← ADD 4
   cors: {
-    origin: [
+   origin: [
   'http://localhost:3000',
   'https://skill-swap-chi-nine.vercel.app',
   'https://skill-swap-qxni6wrd9-kanishkk-singhs-projects.vercel.app',
@@ -57,6 +57,16 @@ io.on('connection', (socket) => {
 
   socket.on('ice-candidate', ({ to, candidate }) => {
     io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  });
+
+  // ── Call rejected ──────────────────────────────────────────────────────
+  socket.on('call-rejected', ({ to }) => {
+    io.to(to).emit('call-rejected');
+  });
+
+  // ── End call — tell everyone in room to leave ──────────────────────────
+  socket.on('end-call', ({ roomId, username }) => {
+    socket.to(roomId).emit('peer-left', { id: socket.id, username });
   });
 
   socket.on('disconnect', () => {
