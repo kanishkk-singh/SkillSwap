@@ -5,6 +5,9 @@ import { useAuth } from '../context/AuthContext';
 import { requestsAPI } from '../services/api';
 import { io } from 'socket.io-client';
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Constants
+// ─────────────────────────────────────────────────────────────────────────────
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -12,121 +15,206 @@ const ICE_CONFIG = {
   ],
 };
 
-// ── Ring sound (Web Audio API — no file needed) ──────────────────────────────
-function playRing() {
+const RING_TIMEOUT = 30000; // 30s → missed call
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Ring sound  (Web Audio API — no file needed)
+// ─────────────────────────────────────────────────────────────────────────────
+let ringCtx = null;
+function startRing() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const ring = (t) => {
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.frequency.value = 480;
-      o.type = 'sine';
-      g.gain.setValueAtTime(0.4, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
-      o.start(t); o.stop(t + 0.6);
+    stopRing();
+    ringCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const playBeep = (t) => {
+      const o = ringCtx.createOscillator();
+      const g = ringCtx.createGain();
+      o.connect(g); g.connect(ringCtx.destination);
+      o.frequency.value = 480; o.type = 'sine';
+      g.gain.setValueAtTime(0.35, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+      o.start(t); o.stop(t + 0.55);
     };
-    ring(ctx.currentTime);
-    ring(ctx.currentTime + 0.8);
-    ring(ctx.currentTime + 1.6);
+    playBeep(ringCtx.currentTime);
+    playBeep(ringCtx.currentTime + 0.7);
+    playBeep(ringCtx.currentTime + 1.4);
   } catch (_) {}
 }
+function stopRing() {
+  try { ringCtx?.close(); } catch (_) {}
+  ringCtx = null;
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Styles — inline so no CSS file dependency
+// ─────────────────────────────────────────────────────────────────────────────
+const S = {
+  // Overlays
+  overlay: {
+    position: 'fixed', inset: 0, zIndex: 9999,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'rgba(0,0,0,0.92)',
+  },
+  card: {
+    background: '#141414', border: '1px solid #2a2a2a',
+    borderRadius: 24, padding: '44px 52px',
+    textAlign: 'center', minWidth: 320,
+    boxShadow: '0 8px 60px rgba(0,0,0,0.6)',
+  },
+  bigName: { fontSize: 22, fontWeight: 700, color: '#f5f5f5', margin: '12px 0 4px' },
+  sub:     { fontSize: 14, color: '#888', marginBottom: 32 },
+
+  // Avatar ring animation
+  avatarWrap: {
+    width: 88, height: 88, borderRadius: '50%', margin: '0 auto 4px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'linear-gradient(135deg,#f97316,#facc15)',
+    fontSize: 34, fontWeight: 800, color: '#111',
+    animation: 'ringPulse 1.3s ease-in-out infinite',
+  },
+
+  // Buttons
+  btnRow:    { display: 'flex', gap: 14, justifyContent: 'center' },
+  btnGreen: {
+    padding: '14px 30px', borderRadius: 12, border: 'none', cursor: 'pointer',
+    background: 'linear-gradient(90deg,#22c55e,#16a34a)',
+    color: '#fff', fontSize: 15, fontWeight: 700,
+  },
+  btnRed: {
+    padding: '14px 30px', borderRadius: 12, border: 'none', cursor: 'pointer',
+    background: '#ef4444', color: '#fff', fontSize: 15, fontWeight: 700,
+  },
+  btnGray: {
+    padding: '12px 26px', borderRadius: 12, border: '1px solid #333', cursor: 'pointer',
+    background: 'transparent', color: '#aaa', fontSize: 14, fontWeight: 600,
+  },
+
+  // Status badge
+  badge: (color) => ({
+    display: 'inline-block', padding: '4px 14px',
+    borderRadius: 99, fontSize: 12, fontWeight: 700,
+    background: color === 'green' ? '#052e16' : color === 'yellow' ? '#1c1a00' : '#1a0a0a',
+    color:      color === 'green' ? '#22c55e' : color === 'yellow' ? '#facc15' : '#ef4444',
+    border: `1px solid ${color === 'green' ? '#166534' : color === 'yellow' ? '#713f12' : '#7f1d1d'}`,
+    marginBottom: 24,
+  }),
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function MeetPage() {
-  const { id }   = useParams();
+  const { id }   = useParams();   // swap request _id = room id
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [request,          setRequest]          = useState(null);
-  const [inCall,           setInCall]           = useState(false);
-  const [micOn,            setMicOn]            = useState(true);
-  const [camOn,            setCamOn]            = useState(true);
-  const [callSecs,         setCallSecs]         = useState(0);
-  const [notes,            setNotes]            = useState('');
-  const [notesOpen,        setNotesOpen]        = useState(true);
-  const [status,           setStatus]           = useState('Waiting for partner…');
-  const [partnerConnected, setPartnerConnected] = useState(false);
-  const [isScreenSharing,  setIsScreenSharing]  = useState(false);
-  const [incomingCall,     setIncomingCall]     = useState(null); // { peerId, name }
+  // ── UI state ────────────────────────────────────────────────────────────────
+  const [request,   setRequest]   = useState(null);
+  const [screen,    setScreen]    = useState('lobby');
+  // screens: lobby | outgoing | incoming | connected | declined | missed | ended | full
 
-  const localVideoRef  = useRef(null);
-  const remoteVideoRef = useRef(null);
-  const localStream    = useRef(null);
-  const screenStream   = useRef(null);
-  const peerConn       = useRef(null);
-  const socketRef      = useRef(null);
-  const timerRef       = useRef(null);
-  const remotePeerId   = useRef(null);
-  const ringInterval   = useRef(null);
-  const notesKey       = `ss_notes_${id}`;
+  const [micOn,        setMicOn]        = useState(true);
+  const [camOn,        setCamOn]        = useState(true);
+  const [notesOpen,    setNotesOpen]    = useState(false);
+  const [notes,        setNotes]        = useState('');
+  const [callSecs,     setCallSecs]     = useState(0);
+  const [isSharing,    setIsSharing]    = useState(false);
+  const [partnerName,  setPartnerName]  = useState('');
+  const [incomingInfo, setIncomingInfo] = useState(null); // { peerId, name, offer }
+  const [statusMsg,    setStatusMsg]    = useState('');
 
+  // ── Refs ────────────────────────────────────────────────────────────────────
+  const localRef   = useRef(null);
+  const remoteRef  = useRef(null);
+  const localStream  = useRef(null);
+  const screenStream = useRef(null);
+  const peerConn     = useRef(null);
+  const socketRef    = useRef(null);
+  const timerRef     = useRef(null);
+  const ringTimer    = useRef(null);  // 30s missed-call timeout
+  const ringLoop     = useRef(null);  // repeat ring every 3s
+  const notesKey     = `ss_notes_${id}`;
+
+  // ── Load request ────────────────────────────────────────────────────────────
   useEffect(() => {
-    requestsAPI.getById(id)
-      .then(res => setRequest(res.data.request))
-      .catch(() => {});
+    requestsAPI.getById(id).then(res => {
+      const r = res.data.request;
+      setRequest(r);
+      const isSender = r.requestedBy === user?.username;
+      setPartnerName(isSender ? r.offeredBy : (r.requestedByName || r.requestedBy));
+    }).catch(() => {});
     setNotes(localStorage.getItem(notesKey) || '');
   }, [id]);
 
-  useEffect(() => () => cleanupCall(), []);
+  useEffect(() => () => fullCleanup(), []);
 
-  const fmtTime = (s) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  const fmt = (s) =>
+    `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
 
-  const saveNotes = (val) => {
-    setNotes(val);
-    localStorage.setItem(notesKey, val);
+  const saveNotes = (v) => { setNotes(v); localStorage.setItem(notesKey, v); };
+
+  const attach = (ref, stream) => {
+    if (ref.current && stream) ref.current.srcObject = stream;
   };
 
-  // ── Attach stream to video element safely ────────────────────────────────
-  const attachStream = (ref, stream) => {
-    if (ref.current && stream) {
-      ref.current.srcObject = stream;
-    }
+  const startRingLoop = () => {
+    startRing();
+    ringLoop.current = setInterval(startRing, 3200);
   };
 
-  const cleanupCall = () => {
+  const stopRingAll = () => {
+    stopRing();
+    clearInterval(ringLoop.current);
+    clearTimeout(ringTimer.current);
+  };
+
+  const fullCleanup = () => {
+    stopRingAll();
     clearInterval(timerRef.current);
-    clearInterval(ringInterval.current);
     localStream.current?.getTracks().forEach(t => t.stop());
     screenStream.current?.getTracks().forEach(t => t.stop());
     peerConn.current?.close();
     socketRef.current?.disconnect();
-    localStream.current = null;
-    peerConn.current    = null;
-    socketRef.current   = null;
+    localStream.current  = null;
+    screenStream.current = null;
+    peerConn.current     = null;
+    socketRef.current    = null;
   };
 
-  // ── Create RTCPeerConnection ─────────────────────────────────────────────
-  const createPeer = useCallback((peerId) => {
-    if (peerConn.current) {
-      peerConn.current.close();
-    }
-    const pc = new RTCPeerConnection(ICE_CONFIG);
-    remotePeerId.current = peerId;
+  // ── Get user media ──────────────────────────────────────────────────────────
+  const getMedia = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream.current = stream;
+    attach(localRef, stream);
+    return stream;
+  };
 
-    localStream.current?.getTracks().forEach(track => {
-      pc.addTrack(track, localStream.current);
-    });
+  // ── RTCPeerConnection ───────────────────────────────────────────────────────
+  const createPeer = useCallback((peerId) => {
+    peerConn.current?.close();
+    const pc = new RTCPeerConnection(ICE_CONFIG);
+
+    localStream.current?.getTracks().forEach(t => pc.addTrack(t, localStream.current));
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
+      if (e.candidate)
         socketRef.current?.emit('ice-candidate', { to: peerId, candidate: e.candidate });
-      }
     };
 
     pc.ontrack = (e) => {
-      attachStream(remoteVideoRef, e.streams[0]);
-      setPartnerConnected(true);
-      setStatus('Connected ✓');
-      // Stop ring when connected
-      clearInterval(ringInterval.current);
+      attach(remoteRef, e.streams[0]);
+      stopRingAll();
+      setScreen('connected');
+      setStatusMsg('Connected');
+      // Start call timer
+      setCallSecs(0);
+      timerRef.current = setInterval(() => setCallSecs(s => s + 1), 1000);
     };
 
     pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      if (state === 'disconnected' || state === 'failed') {
-        setPartnerConnected(false);
-        setStatus('Partner disconnected');
+      const st = pc.connectionState;
+      if (st === 'disconnected' || st === 'failed') {
+        setStatusMsg('Connection lost…');
       }
     };
 
@@ -134,11 +222,11 @@ export default function MeetPage() {
     return pc;
   }, []);
 
-  // ── Setup Socket ─────────────────────────────────────────────────────────
-  const setupSocket = useCallback((stream) => {
+  // ── Socket setup ────────────────────────────────────────────────────────────
+  const connectSocket = useCallback(() => {
     const BACKEND = import.meta.env.VITE_API_URL?.replace('/api', '')
                  || 'https://skillswap-1-nhi4.onrender.com';
-                 
+
     const socket = io(BACKEND, { transports: ['websocket'] });
     socketRef.current = socket;
 
@@ -146,44 +234,51 @@ export default function MeetPage() {
       socket.emit('join-meet', { roomId: id, username: user?.username || 'User' });
     });
 
-    // Existing peers → I call them
+    // ── Room full (3rd person) ──────────────────────────────────────────────
+    socket.on('room-full', () => {
+      stopRingAll();
+      setScreen('full');
+      fullCleanup();
+    });
+
+    // ── Caller: existing peer found → send offer ────────────────────────────
     socket.on('room-peers', async (peers) => {
-      if (peers.length === 0) {
-        setStatus('Waiting for partner…');
-        return;
-      }
+      if (peers.length === 0) return; // callee joined first, wait
       const peer = peers[0];
-      setStatus(`Calling ${peer.username}…`);
-      // Start ring for caller too
-      playRing();
-      ringInterval.current = setInterval(playRing, 4000);
-
-      const pc = createPeer(peer.id);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit('offer', { to: peer.id, offer });
+      // Already on outgoing screen, just send offer
+      try {
+        const pc = createPeer(peer.id);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { to: peer.id, offer });
+      } catch (_) {}
     });
 
-    // New peer joined
     socket.on('peer-joined', ({ id: peerId, username }) => {
-      setStatus(`${username} is joining…`);
+      // Callee arrived — if I'm already on outgoing screen, send offer
+      if (screen === 'outgoing' || socketRef.current) {
+        // offer will be triggered from room-peers on callee side
+      }
+      setStatusMsg(`${username} joined…`);
     });
 
-    // Received offer → show incoming call UI + ring
-    socket.on('offer', async ({ from, offer, username }) => {
-      setIncomingCall({ peerId: from, name: username || 'Partner', offer });
-      // Ring!
-      playRing();
-      ringInterval.current = setInterval(playRing, 4000);
-      setStatus(`Incoming call from ${username}…`);
+    // ── Callee: received offer → show incoming ──────────────────────────────
+    socket.on('offer', async ({ from, offer, username: callerName }) => {
+      setIncomingInfo({ peerId: from, name: callerName || 'Partner', offer });
+      setScreen('incoming');
+      startRingLoop();
+      // Missed call timeout
+      ringTimer.current = setTimeout(() => {
+        stopRingAll();
+        socket.emit('call-missed', { to: from });
+        setScreen('missed');
+      }, RING_TIMEOUT);
     });
 
-    // Received answer
     socket.on('answer', async ({ answer }) => {
       await peerConn.current?.setRemoteDescription(new RTCSessionDescription(answer));
     });
 
-    // ICE
     socket.on('ice-candidate', async ({ candidate }) => {
       if (candidate && peerConn.current) {
         try { await peerConn.current.addIceCandidate(new RTCIceCandidate(candidate)); }
@@ -191,382 +286,379 @@ export default function MeetPage() {
       }
     });
 
-    // ── Partner ended call → navigate away ──────────────────────────────
-    socket.on('peer-left', ({ username }) => {
-      clearInterval(ringInterval.current);
-      alert(`${username || 'Partner'} ended the call.`);
-      cleanupCall();
-      navigate(`/chat/${id}`);
-    });
-
-    // Call rejected
+    // ── Call declined ───────────────────────────────────────────────────────
     socket.on('call-rejected', () => {
-      clearInterval(ringInterval.current);
-      setIncomingCall(null);
-      setStatus('Call declined');
+      stopRingAll();
+      setScreen('declined');
+      localStream.current?.getTracks().forEach(t => t.stop());
     });
 
-  }, [id, user, createPeer, navigate]);
+    // ── Caller missed ───────────────────────────────────────────────────────
+    socket.on('call-missed', () => {
+      stopRingAll();
+      setScreen('missed');
+      localStream.current?.getTracks().forEach(t => t.stop());
+    });
 
-  // ── Accept incoming call ─────────────────────────────────────────────────
-  const acceptCall = async () => {
-    clearInterval(ringInterval.current);
-    const { peerId, offer } = incomingCall;
-    setIncomingCall(null);
-    const pc = createPeer(peerId);
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    socketRef.current?.emit('answer', { to: peerId, answer });
-    setStatus('Connecting…');
-  };
+    // ── Partner ended / disconnected ────────────────────────────────────────
+    socket.on('peer-left', ({ username: who }) => {
+      stopRingAll();
+      clearInterval(timerRef.current);
+      fullCleanup();
+      setScreen('ended');
+      setStatusMsg(`${who || 'Partner'} ended the call`);
+    });
 
-  // ── Reject incoming call ─────────────────────────────────────────────────
-  const rejectCall = () => {
-    clearInterval(ringInterval.current);
-    if (incomingCall) {
-      socketRef.current?.emit('call-rejected', { to: incomingCall.peerId });
+  }, [id, user, createPeer]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Actions
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // User A: start outgoing call
+  const startOutgoing = async () => {
+    try { await getMedia(); } catch {
+      alert('Camera/Mic permission denied.'); return;
     }
-    setIncomingCall(null);
-    setStatus('Waiting for partner…');
+    setScreen('outgoing');
+    startRingLoop();
+    connectSocket();
+    // Missed if no answer in 30s
+    ringTimer.current = setTimeout(() => {
+      stopRingAll();
+      socketRef.current?.emit('call-missed', { roomId: id });
+      setScreen('missed');
+      localStream.current?.getTracks().forEach(t => t.stop());
+    }, RING_TIMEOUT);
   };
 
-  // ── Start Call ───────────────────────────────────────────────────────────
-  const startCall = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localStream.current = stream;
-      // ✅ FIX: Always show local camera preview
-      attachStream(localVideoRef, stream);
-    } catch (err) {
-      alert('Camera/Mic access denied. Please allow permissions.');
-      return;
-    }
-    setInCall(true);
-    timerRef.current = setInterval(() => setCallSecs(s => s + 1), 1000);
-    setupSocket(localStream.current);
-  };
-
-  // ── End Call — navigate both users away ──────────────────────────────────
-  const endCall = () => {
-    if (!confirm('End the meeting?')) return;
-    // Tell partner
+  // User A: cancel outgoing call
+  const cancelCall = () => {
+    stopRingAll();
     socketRef.current?.emit('end-call', { roomId: id, username: user?.username });
-    cleanupCall();
+    fullCleanup();
+    setScreen('lobby');
+  };
+
+  // User B: accept incoming
+  const acceptCall = async () => {
+    stopRingAll();
+    try { await getMedia(); } catch {
+      alert('Camera/Mic permission denied.'); return;
+    }
+    setScreen('connecting');
+    const { peerId, offer } = incomingInfo;
+    setIncomingInfo(null);
+    try {
+      const pc = createPeer(peerId);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socketRef.current?.emit('answer', { to: peerId, answer });
+    } catch (_) {}
+  };
+
+  // User B: decline incoming
+  const declineCall = () => {
+    stopRingAll();
+    socketRef.current?.emit('call-rejected', { to: incomingInfo.peerId });
+    setIncomingInfo(null);
+    fullCleanup();
+    setScreen('lobby');
+  };
+
+  // Either user: end connected call
+  const endCall = () => {
+    if (!confirm('End the call?')) return;
+    socketRef.current?.emit('end-call', { roomId: id, username: user?.username });
+    fullCleanup();
     navigate(`/chat/${id}`);
   };
 
-  // ── Toggle Mic ───────────────────────────────────────────────────────────
+  // Mic
   const toggleMic = () => {
-    const track = localStream.current?.getAudioTracks()[0];
-    if (track) { track.enabled = !track.enabled; setMicOn(track.enabled); }
+    const t = localStream.current?.getAudioTracks()[0];
+    if (t) { t.enabled = !t.enabled; setMicOn(t.enabled); }
   };
 
-  // ── Toggle Camera ────────────────────────────────────────────────────────
+  // Camera
   const toggleCam = () => {
-    const track = localStream.current?.getVideoTracks()[0];
-    if (track) {
-      track.enabled = !track.enabled;
-      setCamOn(track.enabled);
-    }
+    const t = localStream.current?.getVideoTracks()[0];
+    if (t) { t.enabled = !t.enabled; setCamOn(t.enabled); }
   };
 
-  // ── Screen Share ─────────────────────────────────────────────────────────
-  const toggleScreenShare = async () => {
-    if (!isScreenSharing) {
+  // Screen share
+  const toggleShare = async () => {
+    if (!isSharing) {
       try {
-        const sStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-        screenStream.current = sStream;
-        const screenTrack = sStream.getVideoTracks()[0];
-
-        // Replace in peer connection
+        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        screenStream.current = ss;
+        const st = ss.getVideoTracks()[0];
         const sender = peerConn.current?.getSenders().find(s => s.track?.kind === 'video');
-        if (sender) sender.replaceTrack(screenTrack);
-
-        // ✅ Show screen in local preview (NOT replacing localStream)
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = sStream;
-        }
-        setIsScreenSharing(true);
-
-        // ✅ FIX: When screen share stops — restore camera immediately
-        screenTrack.onended = () => stopScreenShare();
-      } catch (_) {
-        // User cancelled
-      }
-    } else {
-      stopScreenShare();
-    }
+        if (sender) sender.replaceTrack(st);
+        if (localRef.current) localRef.current.srcObject = ss;
+        setIsSharing(true);
+        st.onended = stopShare;
+      } catch (_) {}
+    } else stopShare();
   };
 
-  // ✅ FIX: Properly restore camera after screen share
-  const stopScreenShare = () => {
+  const stopShare = () => {
     screenStream.current?.getTracks().forEach(t => t.stop());
     screenStream.current = null;
-
-    // Restore camera track in peer connection
-    const camTrack = localStream.current?.getVideoTracks()[0];
+    const ct = localStream.current?.getVideoTracks()[0];
     const sender = peerConn.current?.getSenders().find(s => s.track?.kind === 'video');
-    if (sender && camTrack) {
-      sender.replaceTrack(camTrack);
-    }
-
-    // ✅ Restore local preview to camera
-    if (localVideoRef.current && localStream.current) {
-      localVideoRef.current.srcObject = localStream.current;
-    }
-    setIsScreenSharing(false);
+    if (sender && ct) sender.replaceTrack(ct);
+    if (localRef.current && localStream.current) localRef.current.srcObject = localStream.current;
+    setIsSharing(false);
   };
 
-  // ── Derived ──────────────────────────────────────────────────────────────
-  const isSender    = request?.requestedBy === user?.username;
-  const partnerName = request ? (isSender ? request.offeredBy : request.requestedByName) : '…';
-  const myInitial      = (user?.fname || user?.username || '?')[0].toUpperCase();
-  const partnerInitial = (partnerName || 'P')[0].toUpperCase();
+  // User B: if they land on meet page but haven't "started" yet, auto-connect socket
+  // so they receive the incoming offer
+  useEffect(() => {
+    if (screen === 'lobby' && request) {
+      // Connect socket silently to receive offer
+      if (!socketRef.current) connectSocket();
+    }
+  }, [screen, request]);
 
-  // ════════════════════════════════════════════════════════════════════════
-  //  INCOMING CALL OVERLAY
-  // ════════════════════════════════════════════════════════════════════════
-  if (inCall && incomingCall) return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 9999, flexDirection: 'column', gap: 24,
-    }}>
-      <div style={{
-        background: '#1a1a1a', border: '1px solid #333', borderRadius: 20,
-        padding: '40px 48px', textAlign: 'center',
-        boxShadow: '0 0 60px rgba(249,115,22,0.3)',
-      }}>
-        {/* Animated ring */}
-        <div style={{
-          width: 80, height: 80, borderRadius: '50%',
-          background: 'linear-gradient(135deg,#f97316,#facc15)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          margin: '0 auto 20px',
-          animation: 'ring-pulse 1s infinite',
-          fontSize: 32,
-        }}>
-          📞
-        </div>
-        <style>{`
-          @keyframes ring-pulse {
-            0%,100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(249,115,22,0.4); }
-            50% { transform: scale(1.08); box-shadow: 0 0 0 20px rgba(249,115,22,0); }
-          }
-        `}</style>
-        <div style={{ fontSize: 22, fontWeight: 700, color: '#f5f5f5', marginBottom: 6 }}>
-          Incoming Call
-        </div>
-        <div style={{ color: '#facc15', fontSize: 16, marginBottom: 32 }}>
-          {incomingCall.name} wants to connect
-        </div>
-        <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
-          <button onClick={rejectCall} style={{
-            padding: '14px 28px', borderRadius: 10, border: 'none',
-            background: '#ef4444', color: '#fff', fontSize: 16,
-            fontWeight: 700, cursor: 'pointer',
-          }}>
-            ✕ Decline
-          </button>
-          <button onClick={acceptCall} style={{
-            padding: '14px 28px', borderRadius: 10, border: 'none',
-            background: 'linear-gradient(90deg,#22c55e,#16a34a)',
-            color: '#fff', fontSize: 16, fontWeight: 700, cursor: 'pointer',
-          }}>
-            ✓ Accept
-          </button>
-        </div>
-      </div>
-    </div>
+  // ── Derived ──────────────────────────────────────────────────────────────
+  const myInit = (user?.fname || user?.username || '?')[0].toUpperCase();
+  const ptInit = (partnerName || 'P')[0].toUpperCase();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  RENDER HELPERS
+  // ═══════════════════════════════════════════════════════════════════════════
+  const GlobalStyle = () => (
+    <style>{`
+      @keyframes ringPulse {
+        0%,100% { box-shadow: 0 0 0 0 rgba(249,115,22,0.5); }
+        50%      { box-shadow: 0 0 0 22px rgba(249,115,22,0); transform: scale(1.06); }
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .meet-ctrl-btn {
+        width:52px; height:52px; border-radius:50%; border:1px solid #333;
+        background:#1a1a1a; color:#f5f5f5; font-size:18px;
+        display:flex; align-items:center; justify-content:center;
+        cursor:pointer; transition:.15s; flex-shrink:0;
+      }
+      .meet-ctrl-btn:hover { background:#2a2a2a; transform:scale(1.06); }
+      .meet-ctrl-btn.off   { color:#ef4444; border-color:#ef4444; background:#1a0a0a; }
+      .meet-ctrl-btn.active{ color:#facc15; border-color:#facc15; }
+      .meet-ctrl-btn.end   { background:#ef4444; color:#fff; border-color:#ef4444; width:58px; height:58px; font-size:20px; }
+      .meet-ctrl-btn.end:hover { background:#dc2626; }
+    `}</style>
   );
 
-  // ════════════════════════════════════════════════════════════════════════
-  //  LOBBY
-  // ════════════════════════════════════════════════════════════════════════
-  if (!inCall) return (
-    <div id="lobby" style={{
-      flex: 1, display: 'flex', flexDirection: 'column',
-      alignItems: 'center', justifyContent: 'center',
-      gap: 24, padding: 24, textAlign: 'center',
-      minHeight: '100vh', background: 'var(--bg)',
-    }}>
+  // ── Lobby ──────────────────────────────────────────────────────────────────
+  if (screen === 'lobby') return (
+    <div style={{ minHeight:'100vh', background:'var(--bg)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:24, padding:24, textAlign:'center' }}>
+      <GlobalStyle />
       <div className="meet-icon">🎥</div>
       <div className="meet-title">Video Meeting Room</div>
       <div className="meet-sub">
         {request ? `Ready to connect with ${partnerName} to learn ${request.skillName}?` : 'Get ready to connect!'}
       </div>
       <div className="partner-chip">
-        <div className="dot" />
-        <span>{partnerName}</span>
-        <span style={{ color: 'var(--muted)', fontSize: 12 }}>· Skill Swap Partner</span>
+        <div className="dot" /><span>{partnerName}</span>
+        <span style={{ color:'var(--muted)', fontSize:12 }}>· Skill Swap Partner</span>
       </div>
       <div className="info-row">
-        <span><i className="fas fa-lock" style={{ color: 'var(--accent1)' }} /> Private room</span>
-        <span><i className="fas fa-clock" style={{ color: 'var(--accent1)' }} /> No time limit</span>
-        <span><i className="fas fa-shield-alt" style={{ color: 'var(--accent1)' }} /> Secure</span>
+        <span><i className="fas fa-lock" style={{ color:'var(--accent1)' }} /> Private</span>
+        <span><i className="fas fa-clock" style={{ color:'var(--accent1)' }} /> No limit</span>
+        <span><i className="fas fa-shield-alt" style={{ color:'var(--accent1)' }} /> Secure</span>
       </div>
-      <button className="join-btn" onClick={startCall}>
-        <i className="fas fa-video" /> Start Meeting
+      <button className="join-btn" onClick={startOutgoing}>
+        <i className="fas fa-video" /> Start Video Call
       </button>
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-        <Link to={`/chat/${id}`} style={{ fontSize: 13, color: 'var(--muted)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ display:'flex', gap:12, flexWrap:'wrap', justifyContent:'center' }}>
+        <Link to={`/chat/${id}`} style={{ fontSize:13, color:'var(--muted)', textDecoration:'none', display:'flex', alignItems:'center', gap:6 }}>
           <i className="fas fa-comments" /> Back to Chat
         </Link>
-        <Link to="/dashboard" style={{ fontSize: 13, color: 'var(--muted)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Link to="/dashboard" style={{ fontSize:13, color:'var(--muted)', textDecoration:'none', display:'flex', alignItems:'center', gap:6 }}>
           <i className="fas fa-tachometer-alt" /> Dashboard
         </Link>
       </div>
     </div>
   );
 
-  // ════════════════════════════════════════════════════════════════════════
-  //  IN-CALL VIEW  — ✅ FIX: controls always visible, video never overflows
-  // ════════════════════════════════════════════════════════════════════════
-  return (
-    <div style={{
-      height: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      background: '#050505',
-      overflow: 'hidden',   // ✅ prevent overflow
-    }}>
-      {/* ── Status bar ── */}
-      <div style={{
-        background: '#111', padding: '8px 16px',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '1px solid #222', flexShrink: 0,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className="rec-dot" />
-          <span style={{ fontSize: 13, fontFamily: 'monospace', color: partnerConnected ? '#22c55e' : '#facc15' }}>
-            {status}
-          </span>
+  // ── Room full ───────────────────────────────────────────────────────────────
+  if (screen === 'full') return (
+    <div style={{ ...S.overlay, background:'var(--bg)', position:'relative' }}>
+      <GlobalStyle />
+      <div style={S.card}>
+        <div style={{ fontSize:48, marginBottom:16 }}>🚫</div>
+        <div style={S.bigName}>Room Full</div>
+        <div style={{ ...S.sub, marginBottom:28 }}>This meeting already has 2 participants.</div>
+        <button style={S.btnGray} onClick={() => navigate(`/chat/${id}`)}>← Back to Chat</button>
+      </div>
+    </div>
+  );
+
+  // ── Outgoing call ───────────────────────────────────────────────────────────
+  if (screen === 'outgoing') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+      <GlobalStyle />
+      {/* Small local preview */}
+      <video ref={localRef} autoPlay muted playsInline
+        style={{ position:'fixed', bottom:100, right:20, width:120, height:90, borderRadius:12, objectFit:'cover', background:'#111', border:'2px solid #333', transform:'scaleX(-1)' }}
+      />
+      <div style={{ ...S.avatarWrap }}>{ptInit}</div>
+      <div style={S.bigName}>{partnerName}</div>
+      <div style={{ ...S.badge('yellow') }}>📞 Calling…</div>
+      <div style={{ color:'#555', fontSize:13, fontFamily:'monospace' }}>Waiting for {partnerName} to answer</div>
+      <button style={{ ...S.btnRed, marginTop:12, display:'flex', alignItems:'center', gap:8 }} onClick={cancelCall}>
+        <i className="fas fa-phone-slash" /> Cancel
+      </button>
+    </div>
+  );
+
+  // ── Incoming call ───────────────────────────────────────────────────────────
+  if (screen === 'incoming') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+      <GlobalStyle />
+      <div style={{ ...S.avatarWrap }}>{incomingInfo?.name?.[0]?.toUpperCase() || 'P'}</div>
+      <div style={S.bigName}>{incomingInfo?.name || 'Partner'}</div>
+      <div style={{ ...S.badge('yellow') }}>📞 Incoming Call</div>
+      <div style={S.btnRow}>
+        <div style={{ textAlign:'center' }}>
+          <button style={{ ...S.btnRed, width:64, height:64, borderRadius:'50%', fontSize:22, display:'flex', alignItems:'center', justifyContent:'center' }} onClick={declineCall}>
+            <i className="fas fa-phone-slash" />
+          </button>
+          <div style={{ fontSize:11, color:'#888', marginTop:6 }}>Decline</div>
         </div>
-        <span className="call-timer" style={{ fontSize: 14, fontFamily: 'monospace', color: '#facc15' }}>
-          {fmtTime(callSecs)}
-        </span>
+        <div style={{ textAlign:'center' }}>
+          <button style={{ ...S.btnGreen, width:64, height:64, borderRadius:'50%', fontSize:22, display:'flex', alignItems:'center', justifyContent:'center' }} onClick={acceptCall}>
+            <i className="fas fa-phone" />
+          </button>
+          <div style={{ fontSize:11, color:'#888', marginTop:6 }}>Accept</div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── Connecting spinner ──────────────────────────────────────────────────────
+  if (screen === 'connecting') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:16 }}>
+      <GlobalStyle />
+      <div style={{ width:48, height:48, border:'3px solid #333', borderTop:'3px solid #f97316', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
+      <div style={{ color:'#facc15', fontSize:14, fontFamily:'monospace' }}>Connecting…</div>
+    </div>
+  );
+
+  // ── Call declined ───────────────────────────────────────────────────────────
+  if (screen === 'declined') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+      <GlobalStyle />
+      <div style={{ fontSize:52 }}>📵</div>
+      <div style={S.bigName}>Call Declined</div>
+      <div style={{ ...S.badge('red') }}>{partnerName} declined the call</div>
+      <button style={S.btnGray} onClick={() => { setScreen('lobby'); }}>← Back</button>
+    </div>
+  );
+
+  // ── Missed call ─────────────────────────────────────────────────────────────
+  if (screen === 'missed') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+      <GlobalStyle />
+      <div style={{ fontSize:52 }}>📵</div>
+      <div style={S.bigName}>Missed Call</div>
+      <div style={{ ...S.badge('yellow') }}>No answer from {partnerName}</div>
+      <button style={S.btnGray} onClick={() => setScreen('lobby')}>← Back</button>
+    </div>
+  );
+
+  // ── Ended ───────────────────────────────────────────────────────────────────
+  if (screen === 'ended') return (
+    <div style={{ minHeight:'100vh', background:'#060606', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+      <GlobalStyle />
+      <div style={{ fontSize:52 }}>📴</div>
+      <div style={S.bigName}>Call Ended</div>
+      <div style={{ ...S.badge('red') }}>{statusMsg}</div>
+      <div style={{ color:'#555', fontSize:13, fontFamily:'monospace' }}>Duration: {fmt(callSecs)}</div>
+      <button style={S.btnGray} onClick={() => navigate(`/chat/${id}`)}>← Back to Chat</button>
+    </div>
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  CONNECTED — main call UI
+  // ═══════════════════════════════════════════════════════════════════════════
+  return (
+    <div style={{ height:'100vh', display:'flex', flexDirection:'column', background:'#050505', overflow:'hidden' }}>
+      <GlobalStyle />
+
+      {/* Status bar */}
+      <div style={{ background:'#0f0f0f', borderBottom:'1px solid #1e1e1e', padding:'8px 16px', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <span style={{ width:8, height:8, borderRadius:'50%', background:'#22c55e', display:'inline-block', boxShadow:'0 0 6px #22c55e', animation:'ringPulse 2s infinite' }} />
+          <span style={{ fontSize:13, fontFamily:'monospace', color:'#22c55e' }}>Connected</span>
+        </div>
+        <span style={{ fontSize:14, fontFamily:'monospace', color:'#facc15', letterSpacing:2 }}>{fmt(callSecs)}</span>
+        <span style={{ fontSize:12, color:'#555', fontFamily:'monospace' }}>{partnerName}</span>
       </div>
 
-      {/* ── Main area ── */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+      {/* Main */}
+      <div style={{ flex:1, display:'flex', overflow:'hidden', minHeight:0 }}>
 
-        {/* ── Video area ── */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {/* Videos + Controls */}
+        <div style={{ flex:1, display:'flex', flexDirection:'column', minHeight:0 }}>
 
-          {/* ✅ Video grid — takes remaining space, never overlaps controls */}
-          <div style={{
-            flex: 1,
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 2,
-            background: '#000',
-            minHeight: 0,
-            overflow: 'hidden',
-          }}>
-            {/* Local video */}
-            <div style={{ position: 'relative', background: '#0d0d0d', overflow: 'hidden' }}>
-              <video
-                ref={localVideoRef}
-                autoPlay
-                muted
-                playsInline
-                style={{
-                  width: '100%', height: '100%',
-                  objectFit: 'cover',
-                  // ✅ Mirror only camera (not screen share)
-                  transform: isScreenSharing ? 'none' : 'scaleX(-1)',
-                }}
+          {/* Video grid */}
+          <div style={{ flex:1, display:'grid', gridTemplateColumns:'1fr 1fr', gap:2, background:'#000', minHeight:0, overflow:'hidden' }}>
+
+            {/* Local */}
+            <div style={{ position:'relative', background:'#0d0d0d', overflow:'hidden' }}>
+              <video ref={localRef} autoPlay muted playsInline
+                style={{ width:'100%', height:'100%', objectFit:'cover', display:'block', transform: isSharing ? 'none' : 'scaleX(-1)' }}
               />
-              {!camOn && !isScreenSharing && (
-                <div style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center', background: '#111',
-                }}>
-                  <div className="cam-avatar">{myInitial}</div>
+              {!camOn && !isSharing && (
+                <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', background:'#111' }}>
+                  <div className="cam-avatar">{myInit}</div>
                   <div className="cam-label">Camera Off</div>
                 </div>
               )}
               <div className="tile-name">
                 <span className={micOn ? 'mic-on' : 'mic-off'} /> You
-                {isScreenSharing && <span style={{ color: '#facc15', marginLeft: 6, fontSize: 11 }}>● Sharing</span>}
+                {isSharing && <span style={{ color:'#facc15', marginLeft:6, fontSize:10 }}>● Screen</span>}
               </div>
             </div>
 
-            {/* Remote video */}
-            <div style={{ position: 'relative', background: '#0d0d0d', overflow: 'hidden' }}>
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            {/* Remote */}
+            <div style={{ position:'relative', background:'#0d0d0d', overflow:'hidden' }}>
+              <video ref={remoteRef} autoPlay playsInline
+                style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }}
               />
-              {!partnerConnected && (
-                <div style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center', background: '#111',
-                }}>
-                  <div className="cam-avatar">{partnerInitial}</div>
-                  <div className="cam-label">{status}</div>
-                </div>
-              )}
-              <div className="tile-name">
-                <span className="mic-on" /> {partnerName}
-              </div>
+              <div className="tile-name"><span className="mic-on" /> {partnerName}</div>
             </div>
           </div>
 
-          {/* ✅ Controls — always at bottom, never hidden */}
-          <div className="controls" style={{ flexShrink: 0 }}>
-            <button
-              className={`ctrl-btn ${micOn ? '' : 'off'}`}
-              onClick={toggleMic}
-              title={micOn ? 'Mute' : 'Unmute'}
-            >
+          {/* Controls */}
+          <div className="controls" style={{ flexShrink:0 }}>
+            <button className={`meet-ctrl-btn ${micOn ? '' : 'off'}`} onClick={toggleMic} title={micOn ? 'Mute' : 'Unmute'}>
               <i className={`fas fa-microphone${micOn ? '' : '-slash'}`} />
             </button>
-
-            <button
-              className={`ctrl-btn ${camOn ? '' : 'off'}`}
-              onClick={toggleCam}
-              title={camOn ? 'Camera Off' : 'Camera On'}
-            >
+            <button className={`meet-ctrl-btn ${camOn ? '' : 'off'}`} onClick={toggleCam} title={camOn ? 'Cam off' : 'Cam on'}>
               <i className={`fas fa-video${camOn ? '' : '-slash'}`} />
             </button>
-
-            <button
-              className={`ctrl-btn ${isScreenSharing ? 'active' : ''}`}
-              onClick={toggleScreenShare}
-              title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
-              style={isScreenSharing ? { color: '#facc15', borderColor: '#facc15' } : {}}
-            >
+            <button className={`meet-ctrl-btn ${isSharing ? 'active' : ''}`} onClick={toggleShare} title={isSharing ? 'Stop share' : 'Share screen'}>
               <i className="fas fa-desktop" />
             </button>
-
-            <button className="ctrl-btn end-call" onClick={endCall} title="End Call">
+            <button className="meet-ctrl-btn end" onClick={endCall} title="End call">
               <i className="fas fa-phone-slash" />
             </button>
-
-            <button
-              className="ctrl-btn"
-              onClick={() => setNotesOpen(n => !n)}
-              title="Notes"
-              style={notesOpen ? { color: '#facc15', borderColor: '#facc15' } : {}}
-            >
+            <button className={`meet-ctrl-btn ${notesOpen ? 'active' : ''}`} onClick={() => setNotesOpen(n => !n)} title="Notes">
               <i className="fas fa-sticky-note" />
             </button>
           </div>
         </div>
 
-        {/* ── Notes panel ── */}
+        {/* Notes */}
         {notesOpen && (
           <div className="notes-panel">
             <div className="notes-header">📝 Session Notes</div>
             <div className="notes-body">
               <textarea
-                placeholder={`Take notes during your session…\n\n• Topics covered\n• Resources shared\n• Action items`}
+                placeholder={`Take notes…\n\n• Topics covered\n• Resources shared\n• Action items`}
                 value={notes}
                 onChange={e => saveNotes(e.target.value)}
               />
